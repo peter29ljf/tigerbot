@@ -1,0 +1,16 @@
+# Tiger API credentials — never commit
+tiger_openapi_config.properties
+
+# Local Claude/Cursor settings
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env

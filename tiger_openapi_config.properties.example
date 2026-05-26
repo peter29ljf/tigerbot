@@ -1,0 +1,5 @@
+private_key_pk8=<your RSA private key in PKCS8 format, one line>
+tiger_id=<your tiger_id>
+account=<your account number>
+license=TBNZ
+env=PROD

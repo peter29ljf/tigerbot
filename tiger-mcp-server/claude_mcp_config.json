@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "tiger-openapi": {
+      "command": "python3",
+      "args": [
+        "/path/to/tigermcp/tiger-mcp-server/server.py",
+        "--config",
+        "/path/to/tigermcp/tiger_openapi_config.properties"
+      ]
+    }
+  }
+}
