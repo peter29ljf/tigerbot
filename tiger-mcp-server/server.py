@@ -8,11 +8,9 @@ Tiger Brokers OpenAPI — MCP Server
     python3 server.py --config /path/to/tiger_openapi_config.properties
 
 MCP 工具列表:
-    get_stock_quote       — 股票实时报价
-    get_stock_bars        — K 线 / 历史行情
     get_option_expirations — 期权到期日
     get_option_chain      — 期权链（含OI/IV/Greeks）
-    get_nvda_oi_analysis  — NVDA OI 支撑压力分析（一键）
+    get_oi_analysis       — 任意标的 OI 支撑压力分析
     get_account           — 账户总览
     get_positions         — 持仓查询
     get_assets            — 资产查询
@@ -20,7 +18,6 @@ MCP 工具列表:
     cancel_order          — 撤单
     get_orders            — 订单查询
     get_market_status     — 市场状态
-    get_future_bars       — 期货K线
 """
 
 import argparse
@@ -44,7 +41,7 @@ try:
     from tigeropen.tiger_open_config import TigerOpenClientConfig
     from tigeropen.quote.quote_client import QuoteClient
     from tigeropen.trade.trade_client import TradeClient
-    from tigeropen.common.consts import Language, Market, BarPeriod, SecurityType, Currency
+    from tigeropen.common.consts import Language, Market, SecurityType, Currency
     from tigeropen.trade.domain.contract import Contract
     from tigeropen.common.util.order_utils import (
         market_order, limit_order, stop_order, stop_limit_order, trail_order
@@ -130,37 +127,6 @@ def _err(msg: str) -> list[types.TextContent]:
 @app.list_tools()
 async def list_tools() -> list[types.Tool]:
     return [
-        types.Tool(
-            name="get_stock_quote",
-            description="获取股票实时报价（价格、涨跌幅、成交量等）",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbols": {"type": "array", "items": {"type": "string"},
-                                "description": "股票代码列表，如 ['NVDA','AAPL']"},
-                    "include_hour_trading": {"type": "boolean", "default": False,
-                                            "description": "是否包含盘前盘后数据"}
-                },
-                "required": ["symbols"]
-            }
-        ),
-        types.Tool(
-            name="get_stock_bars",
-            description="获取股票历史K线数据（OHLCV）",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "symbols": {"type": "array", "items": {"type": "string"}},
-                    "period": {"type": "string",
-                               "enum": ["1min","3min","5min","15min","30min","1hour","4hour","day","week","month"],
-                               "default": "day"},
-                    "limit": {"type": "integer", "default": 60, "description": "返回条数"},
-                    "begin_time": {"type": "string", "description": "开始时间 YYYY-MM-DD，不填则按limit往前取"},
-                    "end_time": {"type": "string", "description": "结束时间 YYYY-MM-DD，不填则取到最新"}
-                },
-                "required": ["symbols"]
-            }
-        ),
         types.Tool(
             name="get_option_expirations",
             description="获取标的股票的期权到期日列表",
@@ -269,7 +235,23 @@ async def list_tools() -> list[types.Tool]:
                         "type": "string",
                         "enum": ["DAY", "GTC"],
                         "default": "DAY",
-                        "description": "订单有效期"
+                        "description": "订单有效期：DAY=当日有效，GTC=撤销前有效"
+                    },
+                    "outside_rth": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "是否允许盘前/盘后交易（outside regular trading hours）。True = 允许盘前+盘后，配合 trading_session_type 可进一步控制夜盘"
+                    },
+                    "trading_session_type": {
+                        "type": "string",
+                        "enum": ["RTH", "PRE_RTH_POST", "OVERNIGHT", "FULL"],
+                        "description": (
+                            "交易时段类型（outside_rth=True 时生效）："
+                            "RTH=仅正规时段(9:30-16:00 ET)；"
+                            "PRE_RTH_POST=盘前+正规+盘后(4:00-20:00 ET)；"
+                            "OVERNIGHT=仅夜盘(20:00-4:00 ET)；"
+                            "FULL=全时段24小时含夜盘"
+                        )
                     }
                 },
                 "required": ["symbol", "action", "quantity", "order_type"]
@@ -286,22 +268,6 @@ async def list_tools() -> list[types.Tool]:
                 "required": ["order_id"]
             }
         ),
-        types.Tool(
-            name="get_future_bars",
-            description="获取期货K线数据",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "identifier": {"type": "string",
-                                   "description": "期货合约代码，如 CLmain(原油)、GCmain(黄金)、ESmain(标普500)"},
-                    "period": {"type": "string",
-                               "enum": ["1min","5min","15min","30min","1hour","day"],
-                               "default": "day"},
-                    "limit": {"type": "integer", "default": 60}
-                },
-                "required": ["identifier"]
-            }
-        ),
     ]
 
 
@@ -312,48 +278,7 @@ async def list_tools() -> list[types.Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     try:
-        if name == "get_stock_quote":
-            symbols = arguments["symbols"]
-            inc_hour = arguments.get("include_hour_trading", False)
-            # 先尝试 get_stock_briefs，失败则尝试 get_timeline（延时行情）
-            df = None
-            last_err = None
-            for method in ['get_stock_briefs', 'get_brief_infos', 'get_stock_detail']:
-                if hasattr(_quote_client, method):
-                    try:
-                        df = getattr(_quote_client, method)(symbols)
-                        break
-                    except Exception as e:
-                        last_err = e
-                        continue
-            if df is None:
-                return _err(f"行情获取失败（账户可能需要在 https://quant.itigerup.com 开通 Open API 行情权限）: {last_err}")
-            return _ok(_df_to_dict(df))
-
-        elif name == "get_stock_bars":
-            period_map = {
-                "1min": BarPeriod.ONE_MINUTE, "3min": BarPeriod.THREE_MINUTES,
-                "5min": BarPeriod.FIVE_MINUTES, "15min": BarPeriod.FIFTEEN_MINUTES,
-                "30min": BarPeriod.HALF_HOUR, "1hour": BarPeriod.ONE_HOUR,
-                "4hour": BarPeriod.FOUR_HOURS, "day": BarPeriod.DAY,
-                "week": BarPeriod.WEEK, "month": BarPeriod.MONTH
-            }
-            period = period_map.get(arguments.get("period", "day"), BarPeriod.DAY)
-
-            def _to_ts(date_str):
-                if not date_str:
-                    return -1
-                return int(datetime.datetime.strptime(date_str, "%Y-%m-%d").timestamp() * 1000)
-
-            df = _quote_client.get_bars(
-                arguments["symbols"], period=period,
-                begin_time=_to_ts(arguments.get("begin_time")),
-                end_time=_to_ts(arguments.get("end_time")),
-                limit=arguments.get("limit", 60)
-            )
-            return _ok(_df_to_dict(df))
-
-        elif name == "get_option_expirations":
+        if name == "get_option_expirations":
             df = _quote_client.get_option_expirations(symbols=[arguments["symbol"]])
             return _ok(_df_to_dict(df))
 
@@ -483,7 +408,21 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             action = arguments["action"]
             quantity = arguments["quantity"]
             tif = arguments.get("time_in_force", "DAY")
+            outside_rth = arguments.get("outside_rth", False)
+            session_type_str = arguments.get("trading_session_type")
 
+            # 解析 trading_session_type 枚举
+            # 注意：工厂函数（limit_order 等）不接受 outside_rth / trading_session_type，
+            # 必须在创建 Order 后手动赋值到对象属性上。
+            trading_session_type = None
+            if session_type_str:
+                try:
+                    from tigeropen.common.consts import TradingSessionType
+                    trading_session_type = TradingSessionType[session_type_str]
+                except (KeyError, ImportError):
+                    trading_session_type = session_type_str  # fallback: 直接传字符串
+
+            # 工厂函数只接受标准参数，outside_rth / trading_session_type 不在其签名内
             common = dict(account=acct, contract=contract, action=action,
                           quantity=quantity, time_in_force=tif)
 
@@ -518,28 +457,28 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             else:
                 return _err(f"不支持的订单类型: {order_type}")
 
+            # 工厂函数建完 Order 后，再手动赋值扩展属性（工厂函数签名不含这两个）
+            if outside_rth:
+                order.outside_rth = True
+            if trading_session_type is not None:
+                order.trading_session_type = trading_session_type
+
             _trade_client.place_order(order)
-            return _ok({"order_id": order.id, "status": "submitted",
-                         "symbol": arguments["symbol"], "action": action,
-                         "quantity": quantity, "order_type": order_type})
+            return _ok({
+                "order_id": order.id,
+                "status": "submitted",
+                "symbol": arguments["symbol"],
+                "action": action,
+                "quantity": quantity,
+                "order_type": order_type,
+                "time_in_force": tif,
+                "outside_rth": outside_rth,
+                "trading_session_type": session_type_str or "RTH(default)",
+            })
 
         elif name == "cancel_order":
             _trade_client.cancel_order(id=arguments["order_id"])
             return _ok({"cancelled": arguments["order_id"]})
-
-        elif name == "get_future_bars":
-            period_map = {
-                "1min": BarPeriod.ONE_MINUTE, "5min": BarPeriod.FIVE_MINUTES,
-                "15min": BarPeriod.FIFTEEN_MINUTES, "30min": BarPeriod.HALF_HOUR,
-                "1hour": BarPeriod.ONE_HOUR, "day": BarPeriod.DAY
-            }
-            period = period_map.get(arguments.get("period", "day"), BarPeriod.DAY)
-            df = _quote_client.get_future_bars(
-                identifiers=[arguments["identifier"]],
-                period=period,
-                limit=arguments.get("limit", 60)
-            )
-            return _ok(_df_to_dict(df))
 
         else:
             return _err(f"未知工具: {name}")
