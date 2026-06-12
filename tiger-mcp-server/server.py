@@ -120,6 +120,87 @@ def _err(msg: str) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=json.dumps({"error": msg}, ensure_ascii=False))]
 
 
+def _get_spot_price(symbol: str) -> tuple[float, str]:
+    """获取股票现价，返回 (price, source)。
+    优先级：
+      1. Bitget USDT 永续合约（SYMBOLUSDT）
+      2. Bitget 现货（SYMBOLUSDT）
+      3. Bitget 现货代币化美股（R{SYMBOL}USDT，如 GEV→RGEVUSDT）
+      4. Yahoo Finance（按当前 session 选价）
+    pytz 自动处理夏令时（EDT/EST）。
+    """
+    import urllib.request, urllib.parse, pytz
+    from datetime import datetime as _dt
+
+    # ── 1. Bitget USDT 永续合约（无需认证，速度最快）──────────
+    try:
+        bitget_symbol = f"{symbol.upper()}USDT"
+        qs = urllib.parse.urlencode({"category": "USDT-FUTURES", "symbol": bitget_symbol})
+        req = urllib.request.Request(
+            f"https://api.bitget.com/api/v3/market/tickers?{qs}",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        if str(data.get("code")) == "00000" and data.get("data"):
+            return float(data["data"][0]["lastPrice"]), "bitget_futures"
+    except Exception:
+        pass
+
+    # ── 2 & 3. Bitget 现货（直接 + R 前缀代币化美股）──────────
+    try:
+        req = urllib.request.Request(
+            "https://api.bitget.com/api/v2/spot/market/tickers",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            spot_data = json.loads(resp.read())
+        spot_tickers = {t["symbol"]: t for t in spot_data.get("data", [])}
+
+        # 先试 SYMBOLUSDT，再试 R{SYMBOL}USDT
+        for candidate in (f"{symbol.upper()}USDT", f"R{symbol.upper()}USDT"):
+            if candidate in spot_tickers:
+                pr = float(spot_tickers[candidate]["lastPr"])
+                tag = "bitget_spot" if not candidate.startswith("R") else "bitget_spot_tokenized"
+                return pr, f"{tag} ({candidate})"
+    except Exception:
+        pass
+
+    # ── 4. Yahoo Finance fallback：按 session 选合适的价格字段 ─
+    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+           f"?interval=1m&range=1d&includePrePost=true")
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+
+    meta = data["chart"]["result"][0]["meta"]
+    # marketState: PRE | PREPRE | REGULAR | POST | POSTPOST | CLOSED
+    state = meta.get("marketState", "CLOSED").upper()
+
+    if state == "REGULAR":
+        price = meta["regularMarketPrice"]
+        src   = "yf_regular"
+    elif state in ("PRE", "PREPRE"):
+        # 盘前：优先盘前价，fallback 今日最近收盘
+        price = meta.get("preMarketPrice") or meta["regularMarketPrice"]
+        src   = "yf_premarket"
+    elif state in ("POST", "POSTPOST"):
+        # 盘后（16:00–20:00 ET）：优先盘后价，fallback 今日收盘
+        price = meta.get("postMarketPrice") or meta["regularMarketPrice"]
+        src   = "yf_afterhours"
+    else:
+        # CLOSED / 夜盘 / 周末：regularMarketPrice = 今日正式收盘价，
+        # 比 previousClose（昨收）更新，不使用 previousClose
+        price = meta["regularMarketPrice"]
+        src   = "yf_closed"
+
+    # 附加调试信息（ET 时间，含夏令时）
+    et_now = _dt.now(pytz.timezone("America/New_York"))
+    et_str = et_now.strftime("%H:%M %Z")  # 显示 EDT 或 EST
+
+    return float(price), f"{src} (ET {et_str}, state={state})"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # TOOL 定义
 # ═══════════════════════════════════════════════════════════════════════════
@@ -266,6 +347,67 @@ async def list_tools() -> list[types.Tool]:
                     "order_id": {"type": "string", "description": "订单ID"}
                 },
                 "required": ["order_id"]
+            }
+        ),
+        types.Tool(
+            name="get_stock_quote",
+            description="获取股票实时报价（最新价、买卖价、涨跌幅）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码，如 TSLA"}
+                },
+                "required": ["symbol"]
+            }
+        ),
+        types.Tool(
+            name="get_stock_bars",
+            description="获取股票K线数据（OHLCV）。period: day=日线, week=周线, hour/1hour=1小时, 4hour=4小时",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码，如 TSLA"},
+                    "period": {
+                        "type": "string",
+                        "default": "day",
+                        "description": "K线周期: day/week/hour/1hour/4hour"
+                    },
+                    "limit": {"type": "integer", "default": 100, "description": "返回根数"}
+                },
+                "required": ["symbol"]
+            }
+        ),
+        types.Tool(
+            name="get_recent_fills",
+            description="获取最近已成交订单（用于检测止盈/止损是否已触发出场）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "过滤特定股票，不填则返回全部"},
+                    "limit": {"type": "integer", "default": 20}
+                }
+            }
+        ),
+        types.Tool(
+            name="cancel_symbol_orders",
+            description="撤销某只股票的全部未成交挂单",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码，如 TSLA"}
+                },
+                "required": ["symbol"]
+            }
+        ),
+        types.Tool(
+            name="close_position",
+            description="市价平掉某只股票的全部持仓（全仓卖出）",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "股票代码，如 TSLA"}
+                },
+                "required": ["symbol"]
             }
         ),
     ]
@@ -480,6 +622,92 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             _trade_client.cancel_order(id=arguments["order_id"])
             return _ok({"cancelled": arguments["order_id"]})
 
+        elif name == "get_stock_quote":
+            symbol = arguments["symbol"]
+            price, source = _get_spot_price(symbol)
+            return _ok({"symbol": symbol, "price": price, "source": source})
+
+        elif name == "get_stock_bars":
+            from tigeropen.common.consts import BarPeriod
+            period_map = {
+                "day":   BarPeriod.DAY,
+                "week":  BarPeriod.WEEK,
+                "hour":  BarPeriod.ONE_HOUR,
+                "1hour": BarPeriod.ONE_HOUR,
+                "4hour": BarPeriod.FOUR_HOURS,
+            }
+            period = period_map.get(arguments.get("period", "day"), BarPeriod.DAY)
+            bars = _quote_client.get_bars(
+                symbols=[arguments["symbol"]],
+                period=period,
+                limit=arguments.get("limit", 100)
+            )
+            return _ok(_df_to_dict(bars))
+
+        elif name == "get_recent_fills":
+            orders = _trade_client.get_orders(
+                symbol=arguments.get("symbol"),
+                limit=arguments.get("limit", 20)
+            )
+            filled = [o for o in orders
+                      if str(o.status).upper() in ("FILLED", "PARTIALLY_FILLED")]
+            result = [{
+                "id": o.id,
+                "symbol": o.contract.symbol if o.contract else None,
+                "action": str(o.action),
+                "quantity": o.quantity,
+                "filled": getattr(o, "filled", None),
+                "avg_fill_price": getattr(o, "avg_fill_price", None),
+                "status": str(o.status),
+            } for o in filled]
+            return _ok(result)
+
+        elif name == "cancel_symbol_orders":
+            symbol = arguments["symbol"]
+            orders = _trade_client.get_orders(symbol=symbol, limit=50)
+            pending_statuses = {"PENDING", "SUBMITTED", "NEW", "PARTIALLY_FILLED",
+                                "PENDING_SUBMIT", "PENDING_CANCEL"}
+            pending = [o for o in orders
+                       if str(o.status).upper() in pending_statuses]
+            cancelled, errors = [], []
+            for o in pending:
+                try:
+                    _trade_client.cancel_order(id=o.id)
+                    cancelled.append(o.id)
+                except Exception as e:
+                    errors.append({"id": o.id, "error": str(e)})
+            return _ok({"cancelled": cancelled, "errors": errors,
+                        "total_cancelled": len(cancelled)})
+
+        elif name == "close_position":
+            symbol = arguments["symbol"]
+            positions = _trade_client.get_positions(symbol=symbol)
+            if not positions:
+                return _ok({"message": "无持仓", "symbol": symbol})
+            pos = positions[0]
+            qty = abs(int(pos.quantity))
+            if qty == 0:
+                return _ok({"message": "持仓数量为0", "symbol": symbol})
+            acct_obj = None
+            for method in ['get_account', 'get_prime_assets', 'get_managed_accounts']:
+                if hasattr(_trade_client, method):
+                    try:
+                        result = getattr(_trade_client, method)()
+                        acct_obj = result[0] if isinstance(result, list) and result else result
+                        if acct_obj:
+                            break
+                    except Exception:
+                        continue
+            if acct_obj is None:
+                return _err("无法获取账户信息")
+            acct = getattr(acct_obj, 'account', None) or str(acct_obj)
+            contract = Contract(symbol=symbol, sec_type=SecurityType.STK, currency=Currency.USD)
+            order = market_order(account=acct, contract=contract,
+                                 action="SELL", quantity=qty, time_in_force="DAY")
+            _trade_client.place_order(order)
+            return _ok({"order_id": order.id, "action": "SELL", "quantity": qty,
+                        "order_type": "MKT", "symbol": symbol, "status": "submitted"})
+
         else:
             return _err(f"未知工具: {name}")
 
@@ -489,9 +717,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
 async def _oi_analysis(symbol: str, num_expiries: int = 3) -> dict:
     """完整 OI 分析：支撑位、压力位、Max Pain、PCR、走势概率"""
-    # 现价
-    brief = _quote_client.get_stock_briefs([symbol])
-    spot = float(brief.loc[brief["symbol"] == symbol, "latest_price"].iloc[0])
+    # 现价（优先 Bitget 合约价，fallback Yahoo Finance）
+    spot, _src = _get_spot_price(symbol)
 
     # 到期日
     exp_df = _quote_client.get_option_expirations(symbols=[symbol])
