@@ -1,9 +1,21 @@
 # Tiger API credentials — never commit
 tiger_openapi_config.properties
 
-# Local Claude/Cursor settings
+# MCP config contains absolute local paths — each user generates their own
+tigerbot/.mcp.json
+
+# Runtime state & logs
+tigerbot/state-*.json
+tigerbot/logs/
+
+# Old dev copy
+tigerbot copy/
+
+# Local Claude/Cowork settings
 .claude/settings.local.json
 **/.claude/settings.local.json
+.agents/
+.codex/
 
 # macOS
 .DS_Store
@@ -14,3 +26,6 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# Logs
+*.log

@@ -1,0 +1,34 @@
+{
+  "symbols": {
+    "TSLA": {
+      "low_alert": 250.0,
+      "high_alert": 300.0,
+      "capital_usd": 2000.0,
+      "price_precision": 2,
+      "qty_precision": 0,
+      "min_order_usd": 10.0
+    },
+    "NVDA": {
+      "low_alert": 120.0,
+      "high_alert": 150.0,
+      "capital_usd": 2000.0,
+      "price_precision": 2,
+      "qty_precision": 0,
+      "min_order_usd": 10.0
+    },
+    "AAPL": {
+      "low_alert": 200.0,
+      "high_alert": 230.0,
+      "capital_usd": 2000.0,
+      "price_precision": 2,
+      "qty_precision": 0,
+      "min_order_usd": 10.0
+    }
+  },
+  "_defaults": {
+    "price_precision": 2,
+    "qty_precision": 0,
+    "capital_usd": 1000.0,
+    "min_order_usd": 10.0
+  }
+}
