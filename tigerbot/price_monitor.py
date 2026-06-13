@@ -5,7 +5,7 @@ Tiger OpenAPI 美股价格监控器 — 多股票版
 用法: python3 price_monitor.py --symbol TSLA
 """
 import argparse, json, os, shutil, subprocess, time, urllib.request, urllib.parse
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, date as ddate
 from pathlib import Path
 
 import pytz
@@ -13,13 +13,17 @@ import pytz
 # ── CLI 参数 ──────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Tiger 美股价格监控器")
 parser.add_argument("--symbol", required=True, help="股票代码，如 TSLA")
+parser.add_argument("--strategy-dir", default=None,
+                    help="策略目录（含 state.json 和 logs/），默认 strategies/{SYMBOL}/")
 args = parser.parse_args()
 SYMBOL = args.symbol
 
 # ── 路径 ──────────────────────────────────────────────
-STRATEGY_DIR = Path(__file__).parent
-STATE_FILE   = STRATEGY_DIR / f"state-{SYMBOL}.json"
-LOG_DIR      = STRATEGY_DIR / "logs" / SYMBOL
+_SCRIPT_DIR  = Path(__file__).parent
+STRATEGY_DIR = Path(args.strategy_dir) if args.strategy_dir \
+               else _SCRIPT_DIR / "strategies" / SYMBOL
+STATE_FILE   = STRATEGY_DIR / "state.json"
+LOG_DIR      = STRATEGY_DIR / "logs"
 LOG_FILE     = LOG_DIR / "monitor.log"
 POLL_SEC     = 30
 ET_TZ        = pytz.timezone("America/New_York")
@@ -27,7 +31,7 @@ ET_TZ        = pytz.timezone("America/New_York")
 # ── 从 config.json 读取默认值 ─────────────────────────
 def load_symbol_config(symbol: str) -> dict:
     try:
-        cfg = json.loads((STRATEGY_DIR / "config.json").read_text())
+        cfg = json.loads((_SCRIPT_DIR / "config.json").read_text())
         defaults = cfg.get("_defaults", {})
         return {**defaults, **cfg.get("symbols", {}).get(symbol, {})}
     except Exception:
@@ -241,26 +245,70 @@ def wake_claude(trigger_name: str, price_str: str, alert_label: str):
         log("❌ 找不到 claude 命令，请先安装: npm install -g @anthropic-ai/claude-code")
         notify(f"{SYMBOL} 错误", "找不到 claude CLI")
 
+# ── 每日重置：检查是否需要触发每日0:00 ATR重算 ──────────
+def check_daily_reset(last_reset_date: ddate | None) -> ddate | None:
+    """
+    在每个交易日（周一至周五）首次检测到日期切换时，
+    触发 daily_reset —— 重算 ATR、撤销旧挂单、重新挂单。
+    返回本次检查后的"最新已重置日期"。
+    """
+    now_et = datetime.now(ET_TZ)
+    today  = now_et.date()
+
+    # 仅工作日（周一=0 … 周五=4）才触发
+    if today.weekday() >= 5:
+        return last_reset_date
+
+    if last_reset_date == today:
+        return last_reset_date  # 今天已经触发过，不重复
+
+    # 新的一天（0:00 后首次检测到日期变化）
+    log(f"📅 新交易日 {today}（ET {now_et:%H:%M}），触发每日重算 ATR + 重新挂单")
+    notify(f"{SYMBOL} 每日重置", f"重算 ATR，重新挂单 {today}")
+    wake_claude("daily_reset", "0:00", "每日重算ATR重新挂单")
+    return today
+
+
 # ── 主循环 ────────────────────────────────────────────
 def main():
     cleanup_duplicate_monitors()
     log("=" * 55)
-    log(f"🔍 {SYMBOL} 美股监控启动  轮询={POLL_SEC}s（仅盘中）  目录={STRATEGY_DIR}")
-    notify(f"{SYMBOL} Monitor", f"已启动，盘中 {POLL_SEC}s 轮询")
+    log(f"🔍 {SYMBOL} 美股监控启动  轮询={POLL_SEC}s  目录={STRATEGY_DIR}")
+    notify(f"{SYMBOL} Monitor", f"已启动，{POLL_SEC}s 轮询 + 每日重置")
 
-    fired       = set()
-    last_price  = None
-    last_run_ts = None
-    errors      = 0
+    fired            = set()
+    last_price       = None
+    last_run_ts      = None
+    errors           = 0
+    # 从 state 读取上次 daily_reset 日期，避免重启后重复触发
+    try:
+        _s = json.loads(STATE_FILE.read_text())
+        _dr = _s.get("last_daily_reset_date")
+        last_daily_reset_date: ddate | None = (
+            ddate.fromisoformat(_dr) if _dr else None
+        )
+    except Exception:
+        last_daily_reset_date = None
 
     while True:
-        # 非交易时间：休眠后直接继续，不轮询价格
+        # ── 每日重置检查（不依赖市场是否开盘）──────────────
+        last_daily_reset_date = check_daily_reset(last_daily_reset_date)
+        # 把已重置日期写回 state，防止重启后重复触发
+        try:
+            _s = json.loads(STATE_FILE.read_text()) if STATE_FILE.exists() else {}
+            _s["last_daily_reset_date"] = last_daily_reset_date.isoformat() if last_daily_reset_date else None
+            STATE_FILE.write_text(json.dumps(_s, indent=2, ensure_ascii=False))
+        except Exception:
+            pass
+
+        # ── 非交易时间：仅休眠，不轮询价格警报 ──────────────
         if not is_market_open():
             now_et = datetime.now(ET_TZ)
             log(f"🌙 市场未开盘（ET {now_et:%H:%M}），休眠 60s")
             time.sleep(60)
             continue
 
+        # ── 盘中价格警报轮询 ──────────────────────────────
         try:
             price  = get_price()
             errors = 0

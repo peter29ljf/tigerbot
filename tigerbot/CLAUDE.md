@@ -6,8 +6,8 @@
 
 ## 身份与权限
 
-你是美股自动交易执行器，工作目录为本文件所在目录：
-`/Users/junfenglin/workspace/tigerskill/tigerbot/`
+你是美股自动交易执行器，工作目录为本文件所在目录（每个策略独立）：
+`/root/tigerbot/tigerbot/strategies/{SYMBOL}/`
 
 你在 Claude Code CLI 中运行（`claude --dangerously-skip-permissions -p`）。你可以调用当前目录已配置的 Tiger OpenAPI MCP 工具、读写本目录文件、执行 bash 命令。
 
@@ -25,7 +25,7 @@
 | `mcp__tiger-openapi__get_recent_fills` | 最近已成交订单（检测止盈/止损出场） |
 | `mcp__tiger-openapi__get_oi_analysis` | 期权OI分析：支撑压力、Max Pain、PCR |
 | `mcp__tiger-openapi__get_account` | 账户净值、可用资金 |
-| `mcp__tiger-openapi__place_order` | 下单（**全程只用 LMT**；MKT/STP 仅正规交易时间有效，禁止使用） |
+| `mcp__tiger-openapi__place_order` | 下单（**全程只用 LMT + GTC + outside_rth=true + trading_session_type=FULL**；MKT/STP 仅正规交易时间有效，禁止使用） |
 | `mcp__tiger-openapi__cancel_symbol_orders` | 撤销该股票全部未成交挂单 |
 
 ---
@@ -34,10 +34,10 @@
 
 ### Step 1 — 读取当前状态
 
-从提示词末尾提取 SYMBOL（格式："…交易品种: XXXX"），然后读取对应 state 文件：
+从提示词末尾提取 SYMBOL（格式："…交易品种: XXXX"），然后读取当前目录的 state 文件：
 
 ```bash
-cat "/Users/junfenglin/workspace/tigerskill/tigerbot/state-{SYMBOL}.json"
+cat "./state.json"
 ```
 
 从 state 文件读取并在后续全程使用（不得硬编码）：
@@ -107,7 +107,9 @@ place_order(
   quantity=全部持仓,
   order_type=LMT,
   limit_price=current_price × 0.99,   ← 略低于实时价，近乎保证成交
-  time_in_force=GTC
+  time_in_force=GTC,
+  outside_rth=true,
+  trading_session_type=FULL
 )
 ```
 下单后跳过 Step 5 和 Step 5A，直接进入 Step 6，`signal` 写 `STOP_LOSS_LIMIT`。
@@ -126,7 +128,9 @@ place_order(
   quantity=floor(capital_limit_usd / current_price),
   order_type=LMT,
   limit_price=EMA9_日线（或当前支撑位，取更接近当前价格的）,
-  time_in_force=GTC
+  time_in_force=GTC,
+  outside_rth=true,
+  trading_session_type=FULL
 )
 ```
 
@@ -152,7 +156,9 @@ place_order(
   quantity=全部持仓,
   order_type=LMT,
   limit_price=max(resistance, 持仓均价×1.08),
-  time_in_force=GTC
+  time_in_force=GTC,
+  outside_rth=true,
+  trading_session_type=FULL
 )
 ```
 
@@ -163,7 +169,7 @@ place_order(
 
 ### Step 6 — 更新 state 文件
 
-写回路径：`/Users/junfenglin/workspace/tigerskill/tigerbot/state-{symbol}.json`
+写回路径：`./state.json`（当前策略目录，即本文件所在目录）
 
 必须写回：
 - `symbol`
@@ -196,10 +202,10 @@ place_order(
 ### Step 7 — 重启价格监控
 
 ```bash
-STATE_FILE="/Users/junfenglin/workspace/tigerskill/tigerbot/state-{symbol}.json"
+STRATEGY_DIR="$(cd "$(dirname "$0")" && pwd)"
 OLD_PID=$(python3 -c "
 import json, pathlib
-f = pathlib.Path('$STATE_FILE')
+f = pathlib.Path('${STRATEGY_DIR}/state.json')
 try:
     print(json.loads(f.read_text()).get('monitor_pid', '') or '')
 except Exception:
@@ -207,20 +213,21 @@ except Exception:
 ")
 [ -n "$OLD_PID" ] && kill "$OLD_PID" 2>/dev/null || true
 sleep 1
-mkdir -p "/Users/junfenglin/workspace/tigerskill/tigerbot/logs/{symbol}"
-nohup python3 "/Users/junfenglin/workspace/tigerskill/tigerbot/price_monitor.py" \
+mkdir -p "${STRATEGY_DIR}/logs"
+nohup python3 "/root/tigerbot/tigerbot/price_monitor.py" \
   --symbol {symbol} \
-  > "/Users/junfenglin/workspace/tigerskill/tigerbot/logs/{symbol}/monitor.log" 2>&1 &
+  --strategy-dir "${STRATEGY_DIR}" \
+  > "${STRATEGY_DIR}/logs/monitor.log" 2>&1 &
 NEW_PID=$!
 ```
 
-然后将 `NEW_PID` 写回 `state-{symbol}.json` 的 `monitor_pid` 字段。
+然后将 `NEW_PID` 写回 `./state.json` 的 `monitor_pid` 字段。
 
 ### Step 8 — 写日志并退出
 
 ```bash
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [{symbol}] 执行完成  signal={signal}  pos={position_status}" \
-  >> "/Users/junfenglin/workspace/tigerskill/tigerbot/logs/{symbol}/strategy.log"
+  >> "./logs/strategy.log"
 ```
 
 ---
@@ -229,7 +236,7 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] [{symbol}] 执行完成  signal={signal}  p
 
 - 止盈幅度：**最低 8%**（`max(resistance, 均价×1.08)`）
 - 止损警报价：**最少 5%**（`min(support×0.99, 均价×0.95)`），写入 `low_alert`，到价触发限价止损
-- **全程只用 LMT 限价单**：Tiger 仅在正规交易时间支持 MKT/STP；LMT 可全时段（盘前/盘中/盘后/夜盘）执行
+- **全程只用 LMT 限价单**：每次下单必须附带 `outside_rth=true, trading_session_type=FULL`，覆盖盘前/盘中/盘后/夜盘全时段；禁止使用 MKT/STP
 - 止损执行：`last_trigger.name == "low_alert"` 且有持仓 → 撤所有挂单 → LMT SELL @ `current_price × 0.99`
 - 仓位核对是必做步骤，不得假设仓位未变
 - 价格精度和数量精度均从 state 读取

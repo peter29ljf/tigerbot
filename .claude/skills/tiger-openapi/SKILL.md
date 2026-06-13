@@ -7,6 +7,18 @@ description: |
 
 # Tiger OpenAPI Python SDK Skill
 
+## 安装路径
+
+此 skill 文件须放置于以下位置之一：
+
+| 作用范围 | 安装路径 |
+|---------|---------|
+| **项目级**（推荐，仅对本仓库生效） | `{repo_root}/.claude/skills/tiger-openapi/SKILL.md` |
+| **用户级**（对当前用户所有项目生效） | `~/.claude/skills/tiger-openapi/SKILL.md` |
+
+克隆本仓库后，文件已在正确的项目级位置（`.claude/skills/tiger-openapi/`），无需额外操作。
+`references/` 子目录和 `scripts/` 子目录须随 SKILL.md 一同保留在同一目录下。
+
 This skill enables Claude to interact with Tiger Brokers' Open Platform via the `tigeropen` Python SDK. It covers market data retrieval, order management, account queries, and real-time push subscriptions for stocks, options, and futures.
 
 ## Prerequisites

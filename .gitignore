@@ -4,7 +4,10 @@ tiger_openapi_config.properties
 # MCP config contains absolute local paths — each user generates their own
 tigerbot/.mcp.json
 
-# Runtime state & logs
+# Runtime state & logs（新结构：每个品种独立目录）
+tigerbot/strategies/*/state.json
+tigerbot/strategies/*/logs/
+# 兼容旧结构
 tigerbot/state-*.json
 tigerbot/logs/
 

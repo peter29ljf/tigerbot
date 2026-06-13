@@ -6,16 +6,20 @@
 
 ```
 tigerbot/
-├── CLAUDE.md          # 策略文档（Claude Code CLI 读取并执行）
-├── config.json        # 各股票默认参数（资金、警报价位、精度）
-├── price_monitor.py   # 价格监控器（触发 Claude 执行策略）
-├── launch.sh          # 一键启动脚本
-├── .mcp.json.example  # MCP 配置模板（复制后填入真实路径）
-├── state-{SYMBOL}.json  # 运行时生成，记录仓位/警报/订单状态
-└── logs/{SYMBOL}/
-    ├── monitor.log    # 价格监控日志
-    ├── strategy.log   # 策略执行摘要
-    └── claude_run.log # Claude Code CLI 完整输出
+├── CLAUDE.md              # 主模板（每次 launch 自动复制到策略目录）
+├── config.json            # 各股票默认参数（资金、警报价位、精度）
+├── price_monitor.py       # 价格监控器（触发 Claude 执行策略）
+├── launch.sh              # 一键启动脚本
+├── .mcp.json.example      # MCP 配置模板（复制后填入真实路径）
+└── strategies/
+    └── {SYMBOL}/          # 每个品种独立目录（launch 自动创建）
+        ├── CLAUDE.md      # 策略文档（从主模板复制）
+        ├── state.json     # 仓位/警报/订单状态
+        └── logs/
+            ├── monitor.log     # 价格监控日志
+            ├── strategy.log    # 策略执行摘要
+            ├── claude_run.log  # Claude Code CLI 完整输出
+            └── first_run.log   # 首次启动输出
 ```
 
 ## 前置条件
@@ -77,9 +81,11 @@ chmod +x launch.sh
 ```
 
 脚本会：
-1. 从 `config.json` 初始化 `state-TSLA.json`
-2. 执行一次完整策略分析（Claude Code CLI）
-3. 后台启动价格监控器（每 30 秒轮询，仅盘中）
+1. 创建 `strategies/TSLA/` 目录
+2. 从主模板复制最新 `CLAUDE.md` 到策略目录
+3. 从 `config.json` 初始化 `strategies/TSLA/state.json`
+4. 在策略目录内执行一次完整策略分析（Claude Code CLI）
+5. 后台启动价格监控器（每 30 秒轮询，仅盘中）
 
 ## 多股票并行
 
@@ -89,7 +95,7 @@ chmod +x launch.sh
 ./launch.sh GEV &
 ```
 
-每个品种有独立的 state 文件、日志目录和监控进程。
+每个品种完全独立：策略文件、state、日志、监控进程互不干扰。
 
 ## 策略概述
 
@@ -105,13 +111,32 @@ chmod +x launch.sh
 
 ```bash
 # 价格监控
-tail -f logs/TSLA/monitor.log
+tail -f strategies/TSLA/logs/monitor.log
 
 # 策略执行
-tail -f logs/TSLA/claude_run.log
+tail -f strategies/TSLA/logs/claude_run.log
 
-# 停止监控
+# 策略摘要
+tail -f strategies/TSLA/logs/strategy.log
+
+# 停止某品种监控
 pkill -f "price_monitor.py.*--symbol.*TSLA"
+```
+
+## 管理多个策略
+
+```bash
+# 查看所有运行中的监控进程
+ps aux | grep price_monitor.py
+
+# 查看所有策略目录
+ls strategies/
+
+# 查看某品种当前状态
+cat strategies/TSLA/state.json | python3 -m json.tool
+
+# 停止所有监控
+pkill -f price_monitor.py
 ```
 
 ## 价格来源
@@ -127,4 +152,4 @@ pkill -f "price_monitor.py.*--symbol.*TSLA"
 
 - `tiger_openapi_config.properties` 含私钥，已加入 `.gitignore`，勿提交
 - `tigerbot/.mcp.json` 含本机绝对路径，已加入 `.gitignore`，使用 `.mcp.json.example` 模板
-- `state-*.json` 含账户仓位信息，已加入 `.gitignore`
+- `strategies/*/state.json` 含账户仓位信息，已加入 `.gitignore`

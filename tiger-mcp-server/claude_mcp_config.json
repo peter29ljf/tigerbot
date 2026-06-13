@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "tiger-openapi": {
-      "command": "python3",
+      "command": "/root/tigerbot/.venv/bin/python",
       "args": [
-        "/path/to/tigermcp/tiger-mcp-server/server.py",
+        "/root/tigerbot/tiger-mcp-server/server.py",
         "--config",
-        "/path/to/tigermcp/tiger_openapi_config.properties"
+        "/root/tigerbot/tiger_openapi_config.properties"
       ]
     }
   }

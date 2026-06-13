@@ -4,13 +4,16 @@ set -euo pipefail
 SYMBOL="${1:?用法: ./launch.sh TSLA}"
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-STATE="$DIR/state-$SYMBOL.json"
-LOG="$DIR/logs/$SYMBOL"
+SYMBOL_DIR="$DIR/strategies/$SYMBOL"
+STATE="$SYMBOL_DIR/state.json"
+LOG="$SYMBOL_DIR/logs"
+
 mkdir -p "$LOG"
 
 echo "┌─────────────────────────────────────────┐"
 echo "│  ${SYMBOL} 美股策略启动                  │"
 echo "└─────────────────────────────────────────┘"
+echo "📁 策略目录: $SYMBOL_DIR"
 
 # ── 检测 Claude Code CLI ─────────────────────────────
 CLAUDE_BIN=""
@@ -42,20 +45,24 @@ echo "✅ 依赖检查通过  claude=$($CLAUDE_BIN --version 2>/dev/null | head 
 pkill -f "price_monitor.py.*--symbol.*$SYMBOL" 2>/dev/null && echo "⏹  旧监控已停止" || true
 sleep 1
 
+# ── 复制主模板 CLAUDE.md 到策略目录（每次覆盖，保持最新）──
+cp "$DIR/CLAUDE.md" "$SYMBOL_DIR/CLAUDE.md"
+echo "📄 策略文件已更新: $SYMBOL_DIR/CLAUDE.md"
+
 # ── 若无 state 文件，从 config.json 初始化 ───────────
 if [ ! -f "$STATE" ]; then
   python3 - <<PY
 import json
 from pathlib import Path
 
-symbol    = "$SYMBOL"
-dir_      = Path("$DIR")
-cfg_path  = dir_ / "config.json"
-state_path = dir_ / f"state-{symbol}.json"
+symbol     = "$SYMBOL"
+main_dir   = Path("$DIR")
+state_path = Path("$STATE")
 
-cfg      = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
-defaults = cfg.get("_defaults", {})
-sym_cfg  = {**defaults, **cfg.get("symbols", {}).get(symbol, {})}
+cfg_path  = main_dir / "config.json"
+cfg       = json.loads(cfg_path.read_text()) if cfg_path.exists() else {}
+defaults  = cfg.get("_defaults", {})
+sym_cfg   = {**defaults, **cfg.get("symbols", {}).get(symbol, {})}
 
 initial_state = {
     "symbol":            symbol,
@@ -85,19 +92,19 @@ initial_state = {
     "min_order_usd":      sym_cfg.get("min_order_usd", 10.0),
 }
 state_path.write_text(json.dumps(initial_state, indent=2, ensure_ascii=False))
-print(f"✅ 初始化 state-{symbol}.json 完成")
+print(f"✅ 初始化 state.json 完成")
 PY
 else
   echo "✅ 读取现有 $STATE"
 fi
 
-# ── 首次执行策略分析 ─────────────────────────────────
+# ── 首次执行策略分析（从策略目录运行）───────────────
 echo ""
 echo "▶ 首次执行策略分析（Claude Code CLI）..."
-"$CLAUDE_BIN" \
+(cd "$SYMBOL_DIR" && "$CLAUDE_BIN" \
   --dangerously-skip-permissions \
   -p "执行当前目录 CLAUDE.md 中定义的完整交易策略循环。交易品种: $SYMBOL" \
-  2>&1 | tee "$LOG/first_run.log"
+  2>&1 | tee "$LOG/first_run.log")
 echo "✅ 首次策略执行完毕"
 
 # ── 显示状态摘要 ─────────────────────────────────────
@@ -115,6 +122,7 @@ echo ""
 echo "┌─────────────────────────────────────────┐"
 echo "│  🚀 ${SYMBOL} 美股系统运行中              │"
 echo "├─────────────────────────────────────────┤"
+echo "│  策略目录 : $SYMBOL_DIR"
 echo "│  监控 PID : ${MPID:-unknown}"
 echo "│  当前警报 :"
 python3 - <<PY
